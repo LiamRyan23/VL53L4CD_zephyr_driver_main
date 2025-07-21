@@ -24,13 +24,3 @@ properties:
       This pin is active low, meaning:
       - Low = sensor shutdown
       - High = sensor active
-
-  int-gpios:
-    type: phandle-array
-    description: |
-      GPIO1 interrupt pin. This pin is used for detection threshold
-      interrupts and data ready signaling.
-
-      This pin is active low, meaning:
-      - Low = interrupt/data ready condition
-      - High = no interrupt

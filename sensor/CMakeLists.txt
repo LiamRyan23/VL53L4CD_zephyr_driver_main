@@ -1,0 +1,1 @@
+add_subdirectory_ifdef(CONFIG_VL53L4CD vl53l4cd)

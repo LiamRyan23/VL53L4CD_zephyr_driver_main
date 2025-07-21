@@ -1,0 +1,26 @@
+# Copyright (c) 2023 STMicroelectronics
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  STMicroelectronics VL53L4CD Time-of-Flight ranging sensor
+
+  The VL53L4CD is a Time-of-Flight (ToF) ranging sensor providing
+  accurate distance measurements up to 130cm.
+
+compatible: "st,vl53l4cd"
+
+include: [sensor-device.yaml, i2c-device.yaml]
+
+properties:
+  reg:
+    required: true
+
+  xshut-gpios:
+    type: phandle-array
+    description: |
+      XSHUT (shutdown) pin. This pin can be used to shutdown
+      the sensor or perform hardware reset.
+
+      This pin is active low, meaning:
+      - Low = sensor shutdown
+      - High = sensor active

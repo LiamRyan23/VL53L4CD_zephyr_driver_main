@@ -1,0 +1,6 @@
+name: VL53L4CD TOF Sensor Example
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .

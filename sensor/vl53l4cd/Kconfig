@@ -9,6 +9,13 @@ config VL53L4CD
 
 if VL53L4CD
 
+config VL53L4CD_XSHUT_GPIO
+    bool "Enable XSHUT GPIO control"
+    default y
+    help
+      Enable XSHUT GPIO control for power management and reset.
+
+
 config VL53L4CD_I2C_FAST_MODE_PLUS
 	bool "Enable I2C Fast Mode Plus (1MHz)"
 	help

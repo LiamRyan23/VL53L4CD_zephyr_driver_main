@@ -249,7 +249,6 @@ static int vl53l4cd_init(const struct device *dev)
 		return -ENODEV;
 	}
 
-#ifdef CONFIG_VL53L4CD_XSHUT_GPIO
 	if (!device_is_ready(config->xshut_gpio.port)) {
 		LOG_ERR("XSHUT GPIO device not ready");
 		return -ENODEV;
@@ -267,7 +266,6 @@ static int vl53l4cd_init(const struct device *dev)
 	k_msleep(2);                              /* Short delay in standby */
 	gpio_pin_set_dt(&config->xshut_gpio, 0);  /* Set XSHUT inactive (high, device starts boot) */
 	k_msleep(10);                             /* Wait for boot sequence (tBOOT = 1.2ms max) */
-#endif
 
 	/* Get software version */
 	status = VL53L4CD_GetSWVersion(&sw_version);

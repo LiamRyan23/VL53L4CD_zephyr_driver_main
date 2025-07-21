@@ -2,19 +2,12 @@
 
 config VL53L4CD
 	bool "VL53L4CD Time-of-Flight distance sensor"
-	default y
+	default n
 	select SENSOR
 	help
 	  Enable driver for VL53L4CD Time-of-Flight distance sensor.
 
 if VL53L4CD
-
-config VL53L4CD_XSHUT_GPIO
-	bool "Enable XSHUT GPIO control"
-	depends on GPIO
-	help
-	  Enable XSHUT (shutdown) GPIO control for hardware reset functionality.
-	  This allows the driver to perform hardware reset of the sensor.
 
 config VL53L4CD_I2C_FAST_MODE_PLUS
 	bool "Enable I2C Fast Mode Plus (1MHz)"

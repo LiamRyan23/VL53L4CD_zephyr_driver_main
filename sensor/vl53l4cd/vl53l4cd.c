@@ -20,6 +20,13 @@
 
 LOG_MODULE_REGISTER(VL53L4CD, CONFIG_SENSOR_LOG_LEVEL);
 
+/* Custom sensor attributes for detection thresholds */
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+#define SENSOR_ATTR_VL53L4CD_DETECTION_LOW_THRESHOLD    (SENSOR_ATTR_PRIV_START + 1)
+#define SENSOR_ATTR_VL53L4CD_DETECTION_HIGH_THRESHOLD   (SENSOR_ATTR_PRIV_START + 2)
+#define SENSOR_ATTR_VL53L4CD_DETECTION_WINDOW           (SENSOR_ATTR_PRIV_START + 3)
+#endif
+
 struct vl53l4cd_data {
 	VL53L4CD_ResultsData_t results;
 	uint16_t sensor_id;
@@ -27,6 +34,21 @@ struct vl53l4cd_data {
 	uint32_t timing_budget_ms;
 	uint32_t inter_measurement_ms;
 	int8_t temperature_offset; /* For temperature compensation */
+	
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+	/* Interrupt support */
+	struct gpio_callback gpio_cb;
+	const struct device *dev;  /* Store device pointer for callback */
+	sensor_trigger_handler_t handler;
+	const struct sensor_trigger *trigger;
+	struct k_work work;  /* For deferred work */
+	
+	/* Detection thresholds */
+	uint16_t distance_low_mm;
+	uint16_t distance_high_mm;
+	uint8_t detection_window;
+	bool thresholds_enabled;
+#endif
 };
 
 static int vl53l4cd_sample_fetch(const struct device *dev, enum sensor_channel chan)
@@ -204,6 +226,56 @@ static int vl53l4cd_attr_set(const struct device *dev,
 			data->temperature_offset = val->val1;
 		}
 		break;
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+	case SENSOR_ATTR_VL53L4CD_DETECTION_LOW_THRESHOLD:
+		/* Set low detection threshold in mm */
+		if (val->val1 < 0 || val->val1 > 4000) {
+			return -EINVAL;
+		}
+		data->distance_low_mm = val->val1;
+		if (data->thresholds_enabled) {
+			status = VL53L4CD_SetDetectionThresholds(dev,
+						data->distance_low_mm,
+						data->distance_high_mm,
+						data->detection_window);
+			if (status != VL53L4CD_ERROR_NONE) {
+				return -EIO;
+			}
+		}
+		break;
+	case SENSOR_ATTR_VL53L4CD_DETECTION_HIGH_THRESHOLD:
+		/* Set high detection threshold in mm */
+		if (val->val1 < 0 || val->val1 > 4000) {
+			return -EINVAL;
+		}
+		data->distance_high_mm = val->val1;
+		if (data->thresholds_enabled) {
+			status = VL53L4CD_SetDetectionThresholds(dev,
+						data->distance_low_mm,
+						data->distance_high_mm,
+						data->detection_window);
+			if (status != VL53L4CD_ERROR_NONE) {
+				return -EIO;
+			}
+		}
+		break;
+	case SENSOR_ATTR_VL53L4CD_DETECTION_WINDOW:
+		/* Set detection window mode (0-3) */
+		if (val->val1 < 0 || val->val1 > 3) {
+			return -EINVAL;
+		}
+		data->detection_window = val->val1;
+		if (data->thresholds_enabled) {
+			status = VL53L4CD_SetDetectionThresholds(dev,
+						data->distance_low_mm,
+						data->distance_high_mm,
+						data->detection_window);
+			if (status != VL53L4CD_ERROR_NONE) {
+				return -EIO;
+			}
+		}
+		break;
+#endif
 	default:
 		return -ENOTSUP;
 	}
@@ -223,6 +295,20 @@ static int vl53l4cd_attr_get(const struct device *dev,
 		val->val1 = data->ranging_active ? 1 : 0;
 		val->val2 = 0;
 		break;
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+	case SENSOR_ATTR_VL53L4CD_DETECTION_LOW_THRESHOLD:
+		val->val1 = data->distance_low_mm;
+		val->val2 = 0;
+		break;
+	case SENSOR_ATTR_VL53L4CD_DETECTION_HIGH_THRESHOLD:
+		val->val1 = data->distance_high_mm;
+		val->val2 = 0;
+		break;
+	case SENSOR_ATTR_VL53L4CD_DETECTION_WINDOW:
+		val->val1 = data->detection_window;
+		val->val2 = 0;
+		break;
+#endif
 	default:
 		return -ENOTSUP;
 	}
@@ -230,11 +316,128 @@ static int vl53l4cd_attr_get(const struct device *dev,
 	return 0;
 }
 
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+/* Work handler for interrupt processing */
+static void vl53l4cd_work_handler(struct k_work *work)
+{
+	struct vl53l4cd_data *data = CONTAINER_OF(work, struct vl53l4cd_data, work);
+	
+	if (data->handler && data->trigger) {
+		data->handler(data->dev, data->trigger);
+	}
+}
+
+/* GPIO interrupt callback */
+static void vl53l4cd_gpio_callback(const struct device *port,
+				   struct gpio_callback *cb,
+				   gpio_port_pins_t pins)
+{
+	struct vl53l4cd_data *data = CONTAINER_OF(cb, struct vl53l4cd_data, gpio_cb);
+	
+	/* Debug: Log GPIO interrupt */
+	printk("VL53L4CD: GPIO interrupt triggered on pins 0x%x\n", pins);
+	
+	/* Submit work to system work queue */
+	k_work_submit(&data->work);
+}
+
+static int vl53l4cd_trigger_set(const struct device *dev,
+				const struct sensor_trigger *trig,
+				sensor_trigger_handler_t handler)
+{
+	const struct vl53l4cd_config *config = dev->config;
+	struct vl53l4cd_data *data = dev->data;
+	VL53L4CD_Error status;
+	
+	/* Only support data ready trigger */
+	if (trig->type != SENSOR_TRIG_DATA_READY) {
+		return -ENOTSUP;
+	}
+
+	/* Disable interrupt during configuration */
+	gpio_pin_interrupt_configure_dt(&config->int_gpio, GPIO_INT_DISABLE);
+	
+	if (handler == NULL) {
+		/* Disable trigger */
+		data->handler = NULL;
+		data->trigger = NULL;
+		data->thresholds_enabled = false;
+		return 0;
+	}
+	
+	/* Check if inter-measurement is enabled (required for detection thresholds) */
+	if (data->inter_measurement_ms == 0) {
+		LOG_ERR("Detection thresholds require inter-measurement period > 0");
+		LOG_ERR("Use SENSOR_ATTR_SAMPLING_FREQUENCY to set inter-measurement period");
+		return -EINVAL;
+	}
+	
+	/* Store handler and trigger */
+	data->handler = handler;
+	data->trigger = trig;
+	data->dev = dev;
+	
+	/* Always apply the current threshold configuration */
+	LOG_INF("About to set thresholds: Low=%dmm, High=%dmm, Window=%d", 
+		data->distance_low_mm, data->distance_high_mm, data->detection_window);
+	
+	status = VL53L4CD_SetDetectionThresholds(dev, 
+					data->distance_low_mm,
+					data->distance_high_mm,
+					data->detection_window);
+	if (status != VL53L4CD_ERROR_NONE) {
+		LOG_ERR("Failed to set detection thresholds: %d", status);
+		return -EIO;
+	}
+	
+	/* Verify immediately after setting */
+	uint16_t verify_low, verify_high;
+	uint8_t verify_window;
+	status = VL53L4CD_GetDetectionThresholds(dev, &verify_low, &verify_high, &verify_window);
+	if (status == VL53L4CD_ERROR_NONE) {
+		LOG_INF("Immediately after setting - Low=%dmm, High=%dmm, Window=%d", 
+			verify_low, verify_high, verify_window);
+		if (verify_window != data->detection_window) {
+			LOG_ERR("CRITICAL: Window mode changed! Expected=%d, Got=%d", 
+				data->detection_window, verify_window);
+		}
+	}
+	
+	data->thresholds_enabled = true;
+	LOG_INF("Applied detection thresholds: Low=%dmm, High=%dmm, Window=%d", 
+		data->distance_low_mm, data->distance_high_mm, data->detection_window);
+	
+	/* Clear any pending interrupts before enabling GPIO interrupt */
+	status = VL53L4CD_ClearInterrupt(dev);
+	if (status != VL53L4CD_ERROR_NONE) {
+		LOG_WRN("Failed to clear interrupt, continuing: %d", status);
+	}
+	
+	/* Force re-apply thresholds just before enabling GPIO interrupt */
+	status = VL53L4CD_SetDetectionThresholds(dev, 
+					data->distance_low_mm,
+					data->distance_high_mm,
+					data->detection_window);
+	if (status != VL53L4CD_ERROR_NONE) {
+		LOG_ERR("Failed to re-apply thresholds before GPIO enable: %d", status);
+		return -EIO;
+	}
+	LOG_INF("Re-applied thresholds just before enabling GPIO interrupt");
+	
+	/* Enable interrupt - try both edges to see which works */
+	LOG_INF("Enabling GPIO interrupt on falling edge");
+	return gpio_pin_interrupt_configure_dt(&config->int_gpio, GPIO_INT_EDGE_BOTH);
+}
+#endif /* CONFIG_VL53L4CD_INT_GPIO */
+
 static const struct sensor_driver_api vl53l4cd_api_funcs = {
 	.sample_fetch = vl53l4cd_sample_fetch,
 	.channel_get = vl53l4cd_channel_get,
 	.attr_set = vl53l4cd_attr_set,
 	.attr_get = vl53l4cd_attr_get,
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+	.trigger_set = vl53l4cd_trigger_set,
+#endif
 };
 
 static int vl53l4cd_init(const struct device *dev)
@@ -266,6 +469,33 @@ static int vl53l4cd_init(const struct device *dev)
 	k_msleep(2);                              /* Short delay in standby */
 	gpio_pin_set_dt(&config->xshut_gpio, 0);  /* Set XSHUT inactive (high, device starts boot) */
 	k_msleep(10);                             /* Wait for boot sequence (tBOOT = 1.2ms max) */
+
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+	/* Configure interrupt GPIO if available */
+	if (config->int_gpio.port != NULL) {
+		if (!device_is_ready(config->int_gpio.port)) {
+			LOG_ERR("INT GPIO device not ready");
+			return -ENODEV;
+		}
+
+		ret = gpio_pin_configure_dt(&config->int_gpio, GPIO_INPUT);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure INT GPIO: %d", ret);
+			return ret;
+		}
+
+		/* Initialize work and callback */
+		k_work_init(&data->work, vl53l4cd_work_handler);
+		gpio_init_callback(&data->gpio_cb, vl53l4cd_gpio_callback,
+				   BIT(config->int_gpio.pin));
+		
+		ret = gpio_add_callback(config->int_gpio.port, &data->gpio_cb);
+		if (ret < 0) {
+			LOG_ERR("Failed to add GPIO callback: %d", ret);
+			return ret;
+		}
+	}
+#endif
 
 	/* Get software version */
 	status = VL53L4CD_GetSWVersion(&sw_version);
@@ -303,6 +533,14 @@ static int vl53l4cd_init(const struct device *dev)
 	data->timing_budget_ms = 50;
 	data->inter_measurement_ms = 0;
 	data->temperature_offset = 0;
+
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+	/* Initialize detection threshold values */
+	data->distance_low_mm = 500;    /* Default: 500mm */
+	data->distance_high_mm = 1000;  /* Default: 1000mm */
+	data->detection_window = 0;     /* Default: below low threshold */
+	data->thresholds_enabled = false;
+#endif
 
 	LOG_INF("VL53L4CD sensor initialized successfully");
 
@@ -343,6 +581,8 @@ static int vl53l4cd_pm_action(const struct device *dev,
 		.i2c_addr = DT_INST_REG_ADDR(inst),			\
 		IF_ENABLED(CONFIG_VL53L4CD_XSHUT_GPIO,			\
 		(.xshut_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, xshut_gpios, {0}),)) \
+		IF_ENABLED(CONFIG_VL53L4CD_INT_GPIO,			\
+		(.int_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, int_gpios, {0}),)) \
 	};								\
 	PM_DEVICE_DT_INST_DEFINE(inst, vl53l4cd_pm_action);		\
 	SENSOR_DEVICE_DT_INST_DEFINE(inst,				\

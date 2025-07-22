@@ -24,3 +24,13 @@ properties:
       This pin is active low, meaning:
       - Low = sensor shutdown
       - High = sensor active
+
+  int-gpios:
+    type: phandle-array
+    description: |
+      INT (interrupt) pin. This pin goes low when new measurement
+      data is ready to be read from the sensor.
+
+      This pin is active low, meaning:
+      - Low = data ready
+      - High = no data available

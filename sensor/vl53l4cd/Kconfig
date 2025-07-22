@@ -15,6 +15,14 @@ config VL53L4CD_XSHUT_GPIO
     help
       Enable XSHUT GPIO control for power management and reset.
 
+config VL53L4CD_INT_GPIO
+    bool "Enable interrupt GPIO support"
+    default n
+    help
+      Enable interrupt GPIO support for data ready notifications.
+      When enabled, the sensor can generate interrupts when new
+      ranging data is available.
+
 
 config VL53L4CD_I2C_FAST_MODE_PLUS
 	bool "Enable I2C Fast Mode Plus (1MHz)"

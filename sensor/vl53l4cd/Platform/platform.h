@@ -89,6 +89,9 @@ struct vl53l4cd_config {
 #ifdef CONFIG_VL53L4CD_XSHUT_GPIO
     struct gpio_dt_spec xshut_gpio;
 #endif
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+    struct gpio_dt_spec int_gpio;
+#endif
 };
 
 #endif	// _PLATFORM_H_

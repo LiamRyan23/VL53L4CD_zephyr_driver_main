@@ -21,10 +21,21 @@
 LOG_MODULE_REGISTER(VL53L4CD, CONFIG_SENSOR_LOG_LEVEL);
 
 /* Custom sensor attributes for detection thresholds */
+#define SENSOR_ATTR_VL53L4CD_SIGMA_THRESHOLD            (SENSOR_ATTR_PRIV_START + 4)
+#define SENSOR_ATTR_VL53L4CD_SIGNAL_THRESHOLD           (SENSOR_ATTR_PRIV_START + 5)
+
 #ifdef CONFIG_VL53L4CD_INT_GPIO
 #define SENSOR_ATTR_VL53L4CD_DETECTION_LOW_THRESHOLD    (SENSOR_ATTR_PRIV_START + 1)
 #define SENSOR_ATTR_VL53L4CD_DETECTION_HIGH_THRESHOLD   (SENSOR_ATTR_PRIV_START + 2)
 #define SENSOR_ATTR_VL53L4CD_DETECTION_WINDOW           (SENSOR_ATTR_PRIV_START + 3)
+
+/*
+ * Detection Window Modes:
+ * 0 = BELOW_LOW: interrupt when distance < low_threshold
+ * 1 = ABOVE_HIGH: interrupt when distance > high_threshold
+ * 2 = OUTSIDE: interrupt when distance < low_threshold OR > high_threshold
+ * 3 = INSIDE: interrupt when low_threshold < distance < high_threshold
+ */
 #endif
 
 struct vl53l4cd_data {
@@ -48,6 +59,10 @@ struct vl53l4cd_data {
 	uint16_t distance_high_mm;
 	uint8_t detection_window;
 	bool thresholds_enabled;
+	
+	/* Sigma and Signal thresholds */
+	uint16_t sigma_threshold_mm;
+	uint16_t signal_threshold_kcps;
 #endif
 };
 
@@ -275,6 +290,34 @@ static int vl53l4cd_attr_set(const struct device *dev,
 			}
 		}
 		break;
+	case SENSOR_ATTR_VL53L4CD_SIGMA_THRESHOLD:
+		/* Set sigma threshold in mm (0-16383) */
+		if (val->val1 < 0 || val->val1 > 16383) {
+			LOG_ERR("Sigma threshold must be 0-16383 mm");
+			return -EINVAL;
+		}
+		status = VL53L4CD_SetSigmaThreshold(dev, (uint16_t)val->val1);
+		if (status != VL53L4CD_ERROR_NONE) {
+			LOG_ERR("Failed to set sigma threshold: %d", status);
+			return -EIO;
+		}
+		data->sigma_threshold_mm = val->val1;
+		LOG_INF("Sigma threshold set to %d mm", val->val1);
+		break;
+	case SENSOR_ATTR_VL53L4CD_SIGNAL_THRESHOLD:
+		/* Set signal threshold in kcps (0-65535) */
+		if (val->val1 < 0 || val->val1 > 65535) {
+			LOG_ERR("Signal threshold must be 0-65535 kcps");
+			return -EINVAL;
+		}
+		status = VL53L4CD_SetSignalThreshold(dev, (uint16_t)val->val1);
+		if (status != VL53L4CD_ERROR_NONE) {
+			LOG_ERR("Failed to set signal threshold: %d", status);
+			return -EIO;
+		}
+		data->signal_threshold_kcps = val->val1;
+		LOG_INF("Signal threshold set to %d kcps", val->val1);
+		break;
 #endif
 	default:
 		return -ENOTSUP;
@@ -293,6 +336,22 @@ static int vl53l4cd_attr_get(const struct device *dev,
 	switch (attr) {
 	case SENSOR_ATTR_SAMPLING_FREQUENCY:
 		val->val1 = data->ranging_active ? 1 : 0;
+		val->val2 = 0;
+		break;
+	case SENSOR_ATTR_VL53L4CD_SIGMA_THRESHOLD:
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+		val->val1 = data->sigma_threshold_mm;
+#else
+		val->val1 = 15; /* Default value if not stored */
+#endif
+		val->val2 = 0;
+		break;
+	case SENSOR_ATTR_VL53L4CD_SIGNAL_THRESHOLD:
+#ifdef CONFIG_VL53L4CD_INT_GPIO
+		val->val1 = data->signal_threshold_kcps;
+#else
+		val->val1 = 1024; /* Default value if not stored */
+#endif
 		val->val2 = 0;
 		break;
 #ifdef CONFIG_VL53L4CD_INT_GPIO
@@ -335,7 +394,7 @@ static void vl53l4cd_gpio_callback(const struct device *port,
 	struct vl53l4cd_data *data = CONTAINER_OF(cb, struct vl53l4cd_data, gpio_cb);
 	
 	/* Debug: Log GPIO interrupt */
-	printk("VL53L4CD: GPIO interrupt triggered on pins 0x%x\n", pins);
+	//printk("VL53L4CD: GPIO interrupt triggered on pins 0x%x\n", pins);
 	
 	/* Submit work to system work queue */
 	k_work_submit(&data->work);
@@ -378,9 +437,6 @@ static int vl53l4cd_trigger_set(const struct device *dev,
 	data->dev = dev;
 	
 	/* Always apply the current threshold configuration */
-	LOG_INF("About to set thresholds: Low=%dmm, High=%dmm, Window=%d", 
-		data->distance_low_mm, data->distance_high_mm, data->detection_window);
-	
 	status = VL53L4CD_SetDetectionThresholds(dev, 
 					data->distance_low_mm,
 					data->distance_high_mm,
@@ -395,8 +451,6 @@ static int vl53l4cd_trigger_set(const struct device *dev,
 	uint8_t verify_window;
 	status = VL53L4CD_GetDetectionThresholds(dev, &verify_low, &verify_high, &verify_window);
 	if (status == VL53L4CD_ERROR_NONE) {
-		LOG_INF("Immediately after setting - Low=%dmm, High=%dmm, Window=%d", 
-			verify_low, verify_high, verify_window);
 		if (verify_window != data->detection_window) {
 			LOG_ERR("CRITICAL: Window mode changed! Expected=%d, Got=%d", 
 				data->detection_window, verify_window);
@@ -404,8 +458,6 @@ static int vl53l4cd_trigger_set(const struct device *dev,
 	}
 	
 	data->thresholds_enabled = true;
-	LOG_INF("Applied detection thresholds: Low=%dmm, High=%dmm, Window=%d", 
-		data->distance_low_mm, data->distance_high_mm, data->detection_window);
 	
 	/* Clear any pending interrupts before enabling GPIO interrupt */
 	status = VL53L4CD_ClearInterrupt(dev);
@@ -422,10 +474,8 @@ static int vl53l4cd_trigger_set(const struct device *dev,
 		LOG_ERR("Failed to re-apply thresholds before GPIO enable: %d", status);
 		return -EIO;
 	}
-	LOG_INF("Re-applied thresholds just before enabling GPIO interrupt");
 	
 	/* Enable interrupt - try both edges to see which works */
-	LOG_INF("Enabling GPIO interrupt on falling edge");
 	return gpio_pin_interrupt_configure_dt(&config->int_gpio, GPIO_INT_EDGE_BOTH);
 }
 #endif /* CONFIG_VL53L4CD_INT_GPIO */
@@ -540,6 +590,10 @@ static int vl53l4cd_init(const struct device *dev)
 	data->distance_high_mm = 1000;  /* Default: 1000mm */
 	data->detection_window = 0;     /* Default: below low threshold */
 	data->thresholds_enabled = false;
+	
+	/* Initialize sigma and signal threshold values */
+	data->sigma_threshold_mm = 15;      /* Default: 15mm */
+	data->signal_threshold_kcps = 1024; /* Default: 1024 kcps */
 #endif
 
 	LOG_INF("VL53L4CD sensor initialized successfully");

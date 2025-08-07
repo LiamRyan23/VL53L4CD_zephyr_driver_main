@@ -19,7 +19,7 @@
 #include "Platform/platform.h"
 
 LOG_MODULE_REGISTER(VL53L4CD, CONFIG_SENSOR_LOG_LEVEL);
-
+//Sigma nad signal test?
 /* Custom sensor attributes for detection thresholds */
 #define SENSOR_ATTR_VL53L4CD_SIGMA_THRESHOLD            (SENSOR_ATTR_PRIV_START + 4)
 #define SENSOR_ATTR_VL53L4CD_SIGNAL_THRESHOLD           (SENSOR_ATTR_PRIV_START + 5)
@@ -649,3 +649,4 @@ static int vl53l4cd_pm_action(const struct device *dev,
 				     &vl53l4cd_api_funcs);
 
 DT_INST_FOREACH_STATUS_OKAY(VL53L4CD_INIT)
+
